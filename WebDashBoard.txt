@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini immersive RGB lighting - Monitor & Game</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1a1a1a; color: #ffffff; text-align: center; margin: 0; padding: 20px; }
+        h1 { color: #00ffcc; text-shadow: 0 0 10px rgba(0,255,204,0.5); }
+        .dashboard-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; max-width: 900px; margin: 0 auto; }
+        .card { background: #2a2a2a; border-radius: 15px; padding: 20px; box-shadow: 0 8px 16px rgba(0,0,0,0.5); flex: 1; min-width: 300px; }
+        
+        #colorBox { width: 120px; height: 120px; background-color: rgb(0,0,0); margin: 15px auto; border-radius: 50%; border: 4px solid #444; box-shadow: 0 0 15px rgba(255,255,255,0.1); transition: background-color 0.1s ease; }
+        .rgb-text { font-size: 1.2em; font-weight: bold; letter-spacing: 2px; }
+        
+        input[type="color"] { width: 100%; height: 50px; border: none; border-radius: 8px; cursor: pointer; background: none; margin-top: 10px; }
+        .status { margin-top: 10px; font-size: 0.9em; color: #7bed9f; margin-bottom: 20px;}
+        
+        .game-color-box { width: 90px; height: 90px; border-radius: 12px; border: 3px solid #555; margin: 10px auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); transition: background-color 0.1s ease;}
+        #guessPicker { width: 90px; height: 90px; padding: 0; cursor: pointer; border: 3px solid #fff; border-radius: 12px; }
+        #scoreText { font-size: 3em; font-weight: 900; transition: color 0.3s ease; }
+        
+        .live-badge { background: #ff4757; color: white; padding: 3px 8px; border-radius: 12px; font-size: 0.7em; vertical-align: middle; animation: blink 1.5s infinite; }
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+
+    <h1>Mini immersive RGB lighting 🎨</h1>
+    <p>CPE 16 - IoT Color Analyzer & Game</p>
+    <div class="status" id="mqttStatus">⏳ กำลังเชื่อมต่อ MQTT Broker...</div>
+
+    <div class="dashboard-container">
+        
+        <div class="card">
+            <h3>👁️ ค่าสีที่อ่านได้ (Live Sensor)</h3>
+            <div id="colorBox"></div>
+            <p class="rgb-text" id="rgbText">R: 0 | G: 0 | B: 0</p>
+            <canvas id="rgbChart" height="150"></canvas>
+        </div>
+
+        <div class="card" style="border: 3px solid #3a7bd5; position: relative;">
+            <h3 style="color: #00d2ff;">🎮 มินิเกมทายสี <span class="live-badge">🔴 LIVE MATCH</span></h3>
+            <p style="font-size: 0.85em; color: #ccc;">คะแนนจะคำนวณแบบ Real-time ตามสีของจริงที่เซนเซอร์อ่านได้!</p>
+            
+            <div style="display: flex; justify-content: space-around; align-items: center; margin-top: 20px;">
+                <div>
+                    <h4>1. สีที่คุณทาย</h4>
+                    <input type="color" id="guessPicker" value="#808080" oninput="checkMatch()">
+                </div>
+                <div>
+                    <h4 id="revealTitle" style="color: #555;">2. เฉลยจากเซนเซอร์</h4>
+                    <div id="resultBox" class="game-color-box" style="background-color: #222;"></div>
+                </div>
+            </div>
+
+            <div id="gameResult" style="margin-top: 25px; padding: 15px; background: #222; border-radius: 10px;">
+                <h3 style="margin: 0; color: #aaa;">ความแม่นยำ (Accuracy)</h3>
+                <div id="scoreText" style="color: #7bed9f; text-shadow: 0 0 15px rgba(123, 237, 159, 0.4);">0.00%</div>
+                <p id="gameFeedback" style="font-size: 1.1em; font-weight: bold; margin-top: 10px;">รอรับค่าจากเซนเซอร์...</p>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        let liveSensorRGB = { r: 0, g: 0, b: 0 };
+        // ไฟล์แยกใช้ wss ได้ปกติ (เพราะไม่ได้ครอบด้วย IP http)
+        const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt');
+        
+        // *** แก้ไข: รับข้อมูลจากช่องทางใหม่ (_v2) ***
+        const topic_sub = "cpe16/spectramatch/sensor_v2"; 
+
+        const ctx = document.getElementById('rgbChart').getContext('2d');
+        const rgbChart = new Chart(ctx, {
+            type: 'bar',
+            data: { labels: ['Red', 'Green', 'Blue'], datasets: [{ data: [0, 0, 0], backgroundColor: ['#ff4757', '#2ed573', '#1e90ff'], borderWidth: 0, borderRadius: 5 }] },
+            options: { scales: { y: { beginAtZero: true, max: 255, grid: { color: '#333' } }, x: { grid: { display: false } } }, plugins: { legend: { display: false } }, animation: { duration: 100 } }
+        });
+
+        client.on('connect', () => {
+            document.getElementById('mqttStatus').innerHTML = "🟢 <b>เชื่อมต่อ MQTT สำเร็จแล้ว!</b>";
+            client.subscribe(topic_sub);
+        });
+
+        client.on('message', (topic, message) => {
+            if(topic === topic_sub) {
+                try {
+                    const data = JSON.parse(message.toString());
+                    liveSensorRGB = { r: data.r, g: data.g, b: data.b };
+                    
+                    document.getElementById('rgbText').innerText = `R: ${data.r} | G: ${data.g} | B: ${data.b}`;
+                    document.getElementById('colorBox').style.backgroundColor = `rgb(${data.r}, ${data.g}, ${data.b})`;
+                    document.getElementById('colorBox').style.boxShadow = `0 0 20px rgb(${data.r}, ${data.g}, ${data.b})`;
+                    rgbChart.data.datasets[0].data = [data.r, data.g, data.b];
+                    rgbChart.update();
+
+                    checkMatch(); 
+                } catch (e) {
+                    console.log("ข้ามข้อความที่ไม่ใช่ JSON:", message.toString());
+                }
+            }
+        });
+
+        function checkMatch() {
+            const hexGuess = document.getElementById('guessPicker').value;
+            const guessR = parseInt(hexGuess.substr(1, 2), 16);
+            const guessG = parseInt(hexGuess.substr(3, 2), 16);
+            const guessB = parseInt(hexGuess.substr(5, 2), 16);
+            
+            const actual = liveSensorRGB;
+
+            document.getElementById('revealTitle').style.color = "#fff";
+            document.getElementById('resultBox').style.backgroundColor = `rgb(${actual.r}, ${actual.g}, ${actual.b})`;
+            document.getElementById('resultBox').style.boxShadow = `0 0 15px rgb(${actual.r}, ${actual.g}, ${actual.b})`;
+
+            const distance = Math.sqrt(Math.pow(guessR - actual.r, 2) + Math.pow(guessG - actual.g, 2) + Math.pow(guessB - actual.b, 2));
+            const maxDistance = 441.67;
+            let matchPercentage = ((1 - (distance / maxDistance)) * 100).toFixed(2);
+            if (matchPercentage < 0) matchPercentage = 0;
+            
+            const scoreText = document.getElementById('scoreText');
+            scoreText.innerText = matchPercentage + "%";
+            const feedback = document.getElementById('gameFeedback');
+            
+            if (matchPercentage >= 90) {
+                scoreText.style.color = "#2ed573"; scoreText.style.textShadow = "0 0 20px rgba(46, 213, 115, 0.6)";
+                feedback.innerHTML = "🎯 เพอร์เฟกต์! แม่นเหมือนจับวาง"; feedback.style.color = "#2ed573";
+            } else if (matchPercentage >= 75) {
+                scoreText.style.color = "#1e90ff"; scoreText.style.textShadow = "0 0 20px rgba(30, 144, 255, 0.6)";
+                feedback.innerHTML = "👍 ใกล้เคียงมาก โทนสีมาถูกทางแล้ว"; feedback.style.color = "#1e90ff";
+            } else {
+                scoreText.style.color = "#ff4757"; scoreText.style.textShadow = "0 0 20px rgba(255, 71, 87, 0.6)";
+                feedback.innerHTML = "😅 ยังไม่ค่อยตรง ลองปรับเฉดสีใหม่ดูนะ"; feedback.style.color = "#ff4757";
+            }
+        }
+    </script>
+</body>
+</html>
